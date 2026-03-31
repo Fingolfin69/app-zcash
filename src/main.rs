@@ -153,17 +153,30 @@ impl TryFrom<u8> for GetUfvkMode {
 #[derive(Debug)]
 pub enum Instruction {
     GetVersion,
-    GetPubkey { display: bool },
+    GetPubkey {
+        display: bool,
+    },
     GetUfvk {
         display: bool,
         mode: GetUfvkMode,
         continue_response: bool,
     },
-    GetTrustedInput { first: bool, next: bool },
-    HashInputStart { first: bool, continue_hashing: bool },
-    HashFinalizeFull { is_change: bool },
+    GetTrustedInput {
+        first: bool,
+        next: bool,
+    },
+    HashInputStart {
+        first: bool,
+        continue_hashing: bool,
+    },
+    HashFinalizeFull {
+        is_change: bool,
+    },
     HashSign,
-    SignMessage { first: bool, next: bool },
+    SignMessage {
+        first: bool,
+        next: bool,
+    },
 }
 
 impl TryFrom<ApduHeader> for Instruction {
