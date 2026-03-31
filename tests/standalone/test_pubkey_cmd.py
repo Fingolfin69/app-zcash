@@ -55,7 +55,7 @@ def test_get_public_key_confirm_refused(backend, scenario_navigator):
     assert len(e.value.data) == 0
 
 
-def test_get_ufvk_no_confirm(backend):
+def test_get_orchard_fvk(backend):
     REF_ORCHARD_FVK_ACC_0 = bytes.fromhex(
         "e129bb7d06ed69a5ac01a664482ec9987fd19c40940bf76d98eb8b952974852949b0128d5072f9f92c7f7e8eb49a5434d2c04b67a30a55946d8322df3e484426f6151235e5897d34196943cb8f968312f1c8fba9ed82830b59f801b6de5da835"
     )

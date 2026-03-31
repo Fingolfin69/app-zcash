@@ -1,14 +1,25 @@
-use ledger_device_sdk::info;
+use alloc::vec::Vec;
+
 use orchard::keys::{FullViewingKey as OrchardFvk, SpendingKey as OrchardSk};
+use zcash_address::unified::{Encoding, Fvk, Ufvk};
+use zcash_protocol::consensus::NetworkType;
 
 use ledger_device_sdk::ecc::{ChainCode, Secret};
+use ledger_device_sdk::info;
 use ledger_device_sdk::io::Comm;
 
 #[cfg(not(feature = "test_zip32_stub"))]
 use ledger_device_sdk::ecc::Pallas;
 
 use crate::utils::HexSlice;
-use crate::{AppSW, GetUfvkMode, utils::bip32_path::Bip32Path};
+use crate::utils::extended_public_key::ExtendedPublicKey;
+use crate::{
+    AppSW, GetUfvkMode,
+    tx::{PendingUfvkResponse, TxContext},
+    utils::bip32_path::Bip32Path,
+};
+
+const UFVK_RESPONSE_CHUNK_LEN: usize = 255;
 
 fn map_ledger_crypto_error(err: ledger_zcash_crypto::Error) -> AppSW {
     match err {
@@ -24,6 +35,21 @@ fn derive_orchard_fvk_bytes(sk: Secret<32>) -> Result<[u8; 96], AppSW> {
     let fvk = OrchardFvk::ledger_try_from(&sk).map_err(map_ledger_crypto_error)?;
 
     Ok(fvk.to_bytes())
+}
+
+// Derives the transparent account public key bytes for the BIP44 path
+// `m/44'/<coin_type>'/<account>'`.
+//
+// Returns 65 bytes: [chain_code (32 bytes) | compressed_pubkey (33 bytes)]
+fn derive_transparent_account_pubkey(path: &[u32]) -> Result<[u8; 65], AppSW> {
+    let extended_public_key = ExtendedPublicKey::try_from(path)?;
+    let compressed_public_key = extended_public_key.compressed_public_key()?;
+
+    let mut result = [0u8; 65];
+    result[..32].copy_from_slice(&extended_public_key.chain_code);
+    result[32..].copy_from_slice(&compressed_public_key);
+
+    Ok(result)
 }
 
 #[cfg(feature = "test_zip32_stub")]
@@ -88,8 +114,40 @@ fn derive_orchard_child_keys(path: &[u32], cc: &mut ChainCode) -> Result<Secret<
     Ok(sk)
 }
 
-pub fn handler_get_ufvk(comm: &mut Comm, _display: bool, mode: GetUfvkMode) -> Result<(), AppSW> {
+fn append_pending_ufvk_chunk(comm: &mut Comm, ctx: &mut TxContext) -> Result<(), AppSW> {
+    let pending = ctx.ufvk_response.as_mut().ok_or(AppSW::BadState)?;
+    let end = core::cmp::min(
+        pending.offset + UFVK_RESPONSE_CHUNK_LEN,
+        pending.bytes.len(),
+    );
+    comm.append(&pending.bytes[pending.offset..end]);
+    pending.offset = end;
+
+    if pending.offset == pending.bytes.len() {
+        ctx.ufvk_response = None;
+    }
+
+    Ok(())
+}
+
+pub fn handler_get_ufvk(
+    comm: &mut Comm,
+    ctx: &mut TxContext,
+    _display: bool,
+    mode: GetUfvkMode,
+    continue_response: bool,
+) -> Result<(), AppSW> {
     let data = comm.get_data().map_err(|_| AppSW::WrongApduLength)?;
+
+    if continue_response {
+        if !data.is_empty() {
+            return Err(AppSW::WrongApduLength);
+        }
+
+        return append_pending_ufvk_chunk(comm, ctx);
+    }
+
+    ctx.ufvk_response = None;
 
     let path = Bip32Path::try_from(data)?;
     let path_slice = path.as_slice();
@@ -105,10 +163,64 @@ pub fn handler_get_ufvk(comm: &mut Comm, _display: bool, mode: GetUfvkMode) -> R
     let orchard_fvk = derive_orchard_fvk_bytes(sk)?;
     info!("Orchard FVK: {}", HexSlice(&orchard_fvk));
 
-    match mode {
-        GetUfvkMode::OrchardFvk => comm.append(&orchard_fvk),
+    let response_bytes = match mode {
+        GetUfvkMode::OrchardFvk => orchard_fvk.to_vec(),
+        GetUfvkMode::Ufvk => {
+            let transparent_bytes = derive_transparent_account_pubkey(
+                &convert_orchard_path_to_transparent_path(path_slice),
+            )?;
+            info!("Transparent PK: {}", HexSlice(&transparent_bytes));
+
+            let network = if is_orchard_testnet(path_slice) {
+                NetworkType::Test
+            } else {
+                NetworkType::Main
+            };
+
+            let ufvk = Ufvk::try_from_items(alloc::vec![
+                Fvk::Orchard(orchard_fvk),
+                Fvk::P2pkh(transparent_bytes),
+            ])
+            .map_err(|_| AppSW::TechnicalProblem)?;
+
+            let ufvk_str = ufvk.encode(&network);
+
+            let ufvk_bytes = ufvk_str.as_bytes();
+            let len = ufvk_bytes.len() as u16;
+            let mut response = Vec::with_capacity(2 + ufvk_bytes.len());
+            response.extend_from_slice(&len.to_be_bytes());
+            response.extend_from_slice(ufvk_bytes);
+            response
+        }
         _ => unimplemented!("Going to be implemented in the next PRs"),
-    }
+    };
+
+    ctx.ufvk_response = Some(PendingUfvkResponse {
+        bytes: response_bytes,
+        offset: 0,
+    });
+
+    append_pending_ufvk_chunk(comm, ctx)?;
 
     Ok(())
+}
+
+fn convert_orchard_path_to_transparent_path(path: &[u32]) -> Vec<u32> {
+    // Convert from m/32'/<coin_type>'/<account>' to m/44'/<coin_type>'/<account>'
+    let mut path = path.to_vec();
+    if let Some(path0) = path.get_mut(0) {
+        *path0 = 44 + 0x8000_0000;
+    }
+
+    path
+}
+
+fn is_orchard_testnet(path: &[u32]) -> bool {
+    // m_Orchard / 32' / 1' / account'
+    if let Some(coin_type) = path.get(1) {
+        if *coin_type == 1 + 0x8000_0000 {
+            return true;
+        }
+    }
+    false
 }

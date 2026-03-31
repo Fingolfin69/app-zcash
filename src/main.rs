@@ -56,9 +56,9 @@ use zeroize::Zeroizing;
 
 use crate::consts::{
     P1_FINALIZE_FULL_CHANGEINFO, P1_FINALIZE_FULL_LAST, P1_FINALIZE_FULL_MORE, P1_FIRST,
-    P1_GET_PUBLIC_KEY_DISPLAY, P1_GET_PUBLIC_KEY_NO_DISPLAY, P1_HASH_INPUT_START_FIRST,
-    P1_HASH_INPUT_START_NEXT, P1_NEXT, P2_FINALIZE_FULL_DEFAULT, P2_HASH_INPUT_START_CONTINUE,
-    P2_HASH_INPUT_START_SAPLING,
+    P1_GET_PUBLIC_KEY_DISPLAY, P1_GET_PUBLIC_KEY_NO_DISPLAY, P1_GET_UFVK_CONTINUE,
+    P1_HASH_INPUT_START_FIRST, P1_HASH_INPUT_START_NEXT, P1_NEXT, P2_FINALIZE_FULL_DEFAULT,
+    P2_HASH_INPUT_START_CONTINUE, P2_HASH_INPUT_START_SAPLING,
 };
 use crate::swap::panic_handler::get_swap_panic_handler;
 use crate::{
@@ -118,6 +118,7 @@ pub enum AppSW {
     TechnicalProblem = 0x6F00,
     VersionParsingFail = 0x6F01,
     TxParsingFail = 0x6F02,
+    BadState = 0xB007,
     Ok = StatusWords::Ok as u16,
 }
 
@@ -153,7 +154,11 @@ impl TryFrom<u8> for GetUfvkMode {
 pub enum Instruction {
     GetVersion,
     GetPubkey { display: bool },
-    GetUfvk { display: bool, mode: GetUfvkMode },
+    GetUfvk {
+        display: bool,
+        mode: GetUfvkMode,
+        continue_response: bool,
+    },
     GetTrustedInput { first: bool, next: bool },
     HashInputStart { first: bool, continue_hashing: bool },
     HashFinalizeFull { is_change: bool },
@@ -185,10 +190,16 @@ impl TryFrom<ApduHeader> for Instruction {
             ) => Ok(Instruction::GetPubkey {
                 display: value.p1 == P1_GET_PUBLIC_KEY_DISPLAY,
             }),
-            (INS_GET_UFVK, p1, p2) if p1 <= 1 => Ok(Instruction::GetUfvk {
-                display: value.p1 == P1_GET_PUBLIC_KEY_DISPLAY,
-                mode: GetUfvkMode::try_from(value.p2)?,
-            }),
+            (INS_GET_UFVK, p1, p2)
+                if p2 <= GetUfvkMode::OrchardFvk as u8
+                    && (p1 & !(P1_GET_PUBLIC_KEY_DISPLAY | P1_GET_UFVK_CONTINUE)) == 0 =>
+            {
+                Ok(Instruction::GetUfvk {
+                    display: (value.p1 & P1_GET_PUBLIC_KEY_DISPLAY) != 0,
+                    mode: GetUfvkMode::try_from(value.p2)?,
+                    continue_response: (value.p1 & P1_GET_UFVK_CONTINUE) != 0,
+                })
+            }
             (INS_GET_TRUSTED_INPUT, p1, 0) => Ok(Instruction::GetTrustedInput {
                 first: p1 == P1_FIRST,
                 next: p1 == P1_NEXT,
@@ -360,7 +371,11 @@ fn handle_apdu(comm: &mut Comm, ins: &Instruction, ctx: &mut TxContext) -> Resul
     match ins {
         Instruction::GetVersion => handler_get_version(comm),
         Instruction::GetPubkey { display } => handler_get_public_key(comm, *display),
-        Instruction::GetUfvk { display, mode } => handler_get_ufvk(comm, *display, *mode),
+        Instruction::GetUfvk {
+            display,
+            mode,
+            continue_response,
+        } => handler_get_ufvk(comm, ctx, *display, *mode, *continue_response),
         Instruction::GetTrustedInput { first, next } => {
             handler_get_trusted_input(comm, ctx, *first, *next)
         }
