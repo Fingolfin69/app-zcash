@@ -30,6 +30,7 @@ class P1(IntEnum):
     P1_GET_PUBLIC_KEY_NO_DISPLAY = 0x00
     # Parameter 1 for screen confirmation for GET_PUBLIC_KEY.
     P1_GET_PUBLIC_KEY_DISPLAY = 0x01
+    P1_GET_UFVK_CONTINUE = 0x80
 
     # Parameter 1 for first APDU number for HASH_INPUT_START.
     P1_HASH_INPUT_START_FIRST = 0x00
@@ -68,6 +69,12 @@ class InsType(IntEnum):
     HASH_SIGN = 0x48
 
 
+class GetUfvkMode(IntEnum):
+    UFVK = 0x00
+    ORCHARD_ADDRESS = 0x01
+    ORCHARD_FVK = 0x02
+
+
 class Errors(IntEnum):
     SW_DENY = 0x6985
     SW_WRONG_P1P2 = 0x6B00
@@ -98,11 +105,18 @@ class ForgeTxParams:
     locktime: int
     expiry: int
 
+
+@dataclass
+class ApduResponse:
+    status: int
+    data: bytes
+
 class ZcashCommandSender:
     def __init__(self, backend: BackendInterface) -> None:
         self.backend = backend
         self.tx_chunks: dict = {}
         self.trusted_inputs: list[bytes] = []
+        self.last_response: Optional[ApduResponse | RAPDU] = None
 
     def exchange_raw(self, data: str) -> Tuple[int, bytes]:
         data_bytes = bytes.fromhex(data)
@@ -143,14 +157,79 @@ class ZcashCommandSender:
             data=pack_derivation_path(path),
         )
 
-    def get_ufvk(self, path: str, display: bool = False) -> RAPDU:
-        return self.backend.exchange(
+    def get_ufvk(
+        self,
+        path: Optional[str] = None,
+        display: bool = False,
+        mode: GetUfvkMode = GetUfvkMode.UFVK,
+        continue_response: bool = False,
+    ) -> RAPDU:
+        response = self.backend.exchange(
+            cla=CLA,
+            ins=InsType.GET_UFVK,
+            p1=(
+                (P1.P1_GET_PUBLIC_KEY_DISPLAY if display else P1.P1_GET_PUBLIC_KEY_NO_DISPLAY)
+                | (P1.P1_GET_UFVK_CONTINUE if continue_response else P1.P1_FIRST)
+            ),
+            p2=mode,
+            data=b"" if continue_response else pack_derivation_path(path),
+        )
+
+        return self._collect_ufvk_response(response, display, mode, continue_response)
+
+    def _collect_ufvk_response(
+        self,
+        response: RAPDU,
+        display: bool,
+        mode: GetUfvkMode,
+        continue_response: bool = False,
+    ) -> RAPDU:
+        if continue_response or mode != GetUfvkMode.UFVK or len(response.data) < 2:
+            return response
+
+        total_response_len = 2 + int.from_bytes(response.data[:2], byteorder="big")
+        response_data = bytearray(response.data)
+
+        while len(response_data) < total_response_len:
+            continuation = self.backend.exchange(
+                cla=CLA,
+                ins=InsType.GET_UFVK,
+                p1=(
+                    (P1.P1_GET_PUBLIC_KEY_DISPLAY if display else P1.P1_GET_PUBLIC_KEY_NO_DISPLAY)
+                    | P1.P1_GET_UFVK_CONTINUE
+                ),
+                p2=mode,
+                data=b"",
+            )
+            response_data.extend(continuation.data)
+            response = continuation
+
+        return ApduResponse(status=response.status, data=bytes(response_data))
+
+    @contextmanager
+    def get_ufvk_async(
+        self,
+        path: str,
+        display: bool = False,
+        mode: GetUfvkMode = GetUfvkMode.ORCHARD_FVK,
+    ) -> Generator[None, None, None]:
+        self.last_response = None
+
+        with self.backend.exchange_async(
             cla=CLA,
             ins=InsType.GET_UFVK,
             p1=P1.P1_GET_PUBLIC_KEY_DISPLAY if display else P1.P1_GET_PUBLIC_KEY_NO_DISPLAY,
-            p2=0x02, # OrchardFvk = 0x2,
+            p2=mode,
             data=pack_derivation_path(path),
-        )
+        ) as response:
+            yield response
+
+        if self.backend.last_async_response is not None:
+            self.last_response = self._collect_ufvk_response(
+                self.backend.last_async_response,
+                display,
+                mode,
+            )
 
     @contextmanager
     def get_public_key_with_confirmation(
@@ -378,5 +457,5 @@ class ZcashCommandSender:
 
         return tx
 
-    def get_async_response(self) -> Optional[RAPDU]:
-        return self.backend.last_async_response
+    def get_async_response(self) -> Optional[ApduResponse | RAPDU]:
+        return self.last_response or self.backend.last_async_response
