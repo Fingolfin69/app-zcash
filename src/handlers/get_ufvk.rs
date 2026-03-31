@@ -218,10 +218,10 @@ fn convert_orchard_path_to_transparent_path(path: &[u32]) -> Vec<u32> {
 
 fn is_orchard_testnet(path: &[u32]) -> bool {
     // m_Orchard / 32' / 1' / account'
-    if let Some(coin_type) = path.get(1) {
-        if *coin_type == 1 + 0x8000_0000 {
-            return true;
-        }
+    if let Some(coin_type) = path.get(1)
+        && *coin_type == 1 + 0x8000_0000
+    {
+        return true;
     }
     false
 }
