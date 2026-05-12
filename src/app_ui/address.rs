@@ -22,6 +22,9 @@ use ledger_device_sdk::nbgl::NbglAddressReview;
 
 use crate::{AppSW, app_ui::load_glyph};
 
+const UFVK_REVIEW_TITLE: &str = "Share Zcash Unified Full Viewing Key?";
+const ORCHARD_FVK_REVIEW_TITLE: &str = "Share Zcash Orchard Full Viewing Key?";
+
 fn display_address(review_title: &str, addr: &str) -> Result<bool, AppSW> {
     // Display the address confirmation screen.
     Ok(NbglAddressReview::new()
@@ -41,7 +44,7 @@ pub fn ui_display_unified_address(addr: &str) -> Result<bool, AppSW> {
 }
 
 // Viewing keys can be long, shorten them for better display.
-fn shorten_viewing_key_to_display<'s>(
+fn shorten_fvk_to_display<'s>(
     viewing_key: &'s str,
     shortened_len: usize,
     prefix_len: usize,
@@ -61,20 +64,20 @@ fn shorten_viewing_key_to_display<'s>(
     Cow::Owned(shortened)
 }
 
-pub fn ui_display_viewing_key(review_title: &str, viewing_key: &str) -> Result<bool, AppSW> {
+fn ui_display_fvk(review_title: &str, fvk: &str) -> Result<bool, AppSW> {
     let viewing_key = if cfg!(any(target_os = "nanosplus", target_os = "nanox")) {
         const ELLIPSIS: &str = "\n ... \n";
         const ROW_LEN: usize = 18;
         const SHORTENED_DISPLAY_LEN: usize = ROW_LEN * 3 * 3 - ROW_LEN;
         const PREFIX_LEN: usize = ROW_LEN * 4;
 
-        shorten_viewing_key_to_display(viewing_key, SHORTENED_DISPLAY_LEN, PREFIX_LEN, ELLIPSIS)
+        shorten_fvk_to_display(fvk, SHORTENED_DISPLAY_LEN, PREFIX_LEN, ELLIPSIS)
     } else {
         const ELLIPSIS: &str = " ... ";
         const SHORTENED_DISPLAY_LEN: usize = if cfg!(target_os = "apex_p") { 125 } else { 132 };
         const PREFIX_LEN: usize = (SHORTENED_DISPLAY_LEN - ELLIPSIS.len()) / 2;
 
-        shorten_viewing_key_to_display(viewing_key, SHORTENED_DISPLAY_LEN, PREFIX_LEN, ELLIPSIS)
+        shorten_fvk_to_display(fvk, SHORTENED_DISPLAY_LEN, PREFIX_LEN, ELLIPSIS)
     };
 
     // Display the viewing key export confirmation screen.
@@ -92,9 +95,9 @@ pub fn ui_display_viewing_key(review_title: &str, viewing_key: &str) -> Result<b
 }
 
 pub fn ui_display_ufvk(ufvk: &str) -> Result<bool, AppSW> {
-    ui_display_viewing_key("Share Zcash Unified Full Viewing Key?", ufvk)
+    ui_display_fvk(UFVK_REVIEW_TITLE, ufvk)
 }
 
 pub fn ui_display_orchard_fvk(orchard_fvk: &str) -> Result<bool, AppSW> {
-    ui_display_viewing_key("Share Zcash Orchard Full Viewing Key?", orchard_fvk)
+    ui_display_fvk(ORCHARD_FVK_REVIEW_TITLE, orchard_fvk)
 }
